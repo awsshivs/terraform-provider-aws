@@ -5,6 +5,7 @@ package glue
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"log"
 	"strings"
@@ -13,6 +14,7 @@ import (
 	"github.com/aws/aws-sdk-go-v2/aws"
 	"github.com/aws/aws-sdk-go-v2/aws/arn"
 	"github.com/aws/aws-sdk-go-v2/service/glue"
+	"github.com/aws/aws-sdk-go-v2/service/glue/document"
 	awstypes "github.com/aws/aws-sdk-go-v2/service/glue/types"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/diag"
 	"github.com/hashicorp/terraform-plugin-sdk/v2/helper/retry"
@@ -38,6 +40,8 @@ func resourceCatalogTable() *schema.Resource {
 		Importer: &schema.ResourceImporter{
 			StateContext: schema.ImportStatePassthroughContext,
 		},
+
+		CustomizeDiff: resourceCatalogTableCustomizeDiff,
 
 		Schema: map[string]*schema.Schema{
 			names.AttrARN: {
@@ -304,9 +308,10 @@ func resourceCatalogTable() *schema.Resource {
 				Optional: true,
 			},
 			"open_table_format_input": {
-				Type:     schema.TypeList,
-				Optional: true,
-				MaxItems: 1,
+				Type:          schema.TypeList,
+				Optional:      true,
+				MaxItems:      1,
+				ConflictsWith: []string{"storage_descriptor", "partition_keys"},
 				Elem: &schema.Resource{
 					Schema: map[string]*schema.Schema{
 						"iceberg_input": {
@@ -324,6 +329,153 @@ func resourceCatalogTable() *schema.Resource {
 										Type:         schema.TypeString,
 										Optional:     true,
 										ValidateFunc: validation.StringLenBetween(1, 255),
+									},
+									"create_iceberg_table_input": {
+										Type:     schema.TypeList,
+										Optional: true,
+										MaxItems: 1,
+										Elem: &schema.Resource{
+											Schema: map[string]*schema.Schema{
+												names.AttrLocation: {
+													Type:     schema.TypeString,
+													Required: true,
+												},
+												"partition_spec": {
+													Type:     schema.TypeList,
+													Optional: true,
+													MaxItems: 1,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"fields": {
+																Type:     schema.TypeList,
+																Required: true,
+																Elem: &schema.Resource{
+																	Schema: map[string]*schema.Schema{
+																		"name": {
+																			Type:     schema.TypeString,
+																			Required: true,
+																		},
+																		"source_id": {
+																			Type:     schema.TypeInt,
+																			Required: true,
+																		},
+																		"transform": {
+																			Type:     schema.TypeString,
+																			Required: true,
+																		},
+																		"field_id": {
+																			Type:     schema.TypeInt,
+																			Optional: true,
+																		},
+																	},
+																},
+															},
+															"spec_id": {
+																Type:     schema.TypeInt,
+																Optional: true,
+															},
+														},
+													},
+												},
+												"properties": {
+													Type:     schema.TypeMap,
+													Optional: true,
+													Elem: &schema.Schema{
+														Type: schema.TypeString,
+													},
+												},
+												"schema": {
+													Type:     schema.TypeList,
+													Required: true,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"fields": {
+																Type:     schema.TypeList,
+																Required: true,
+																Elem: &schema.Resource{
+																	Schema: map[string]*schema.Schema{
+																		"doc": {
+																			Type:     schema.TypeString,
+																			Optional: true,
+																		},
+																		"id": {
+																			Type:     schema.TypeInt,
+																			Required: true,
+																		},
+																		"name": {
+																			Type:     schema.TypeString,
+																			Required: true,
+																		},
+																		"required": {
+																			Type:     schema.TypeBool,
+																			Optional: true,
+																		},
+																		"type": {
+																			Type:         schema.TypeString,
+																			Required:     true,
+																			ValidateFunc: validation.StringIsJSON,
+																		},
+																	},
+																},
+															},
+															"identifier_field_ids": {
+																Type:     schema.TypeList,
+																Optional: true,
+																Elem: &schema.Schema{
+																	Type: schema.TypeInt,
+																},
+															},
+															"schema_id": {
+																Type:     schema.TypeInt,
+																Optional: true,
+															},
+															"type": {
+																Type:     schema.TypeString,
+																Optional: true,
+															},
+														},
+													},
+												},
+												"write_order": {
+													Type:     schema.TypeList,
+													Optional: true,
+													Elem: &schema.Resource{
+														Schema: map[string]*schema.Schema{
+															"fields": {
+																Type:     schema.TypeList,
+																Required: true,
+																Elem: &schema.Resource{
+																	Schema: map[string]*schema.Schema{
+																		"direction": {
+																			Type:         schema.TypeString,
+																			Required:     true,
+																			ValidateFunc: validation.StringInSlice([]string{"asc", "desc"}, false),
+																		},
+																		"null_order": {
+																			Type:         schema.TypeString,
+																			Required:     true,
+																			ValidateFunc: validation.StringInSlice([]string{"nulls-first", "nulls-last"}, false),
+																		},
+																		"source_id": {
+																			Type:     schema.TypeInt,
+																			Required: true,
+																		},
+																		"transform": {
+																			Type:     schema.TypeString,
+																			Required: true,
+																		},
+																	},
+																},
+															},
+															"order_id": {
+																Type:     schema.TypeInt,
+																Required: true,
+															},
+														},
+													},
+												},
+											},
+										},
 									},
 								},
 							},
@@ -396,6 +548,42 @@ func resourceCatalogTable() *schema.Resource {
 		},
 	}
 }
+func resourceCatalogTableCustomizeDiff(ctx context.Context, d *schema.ResourceDiff, meta interface{}) error {
+	// Only bother if OTF is present
+	v, ok := d.GetOk("open_table_format_input")
+	if !ok {
+		return nil
+	}
+	l, ok := v.([]any)
+	if !ok || len(l) == 0 || l[0] == nil {
+		return nil
+	}
+
+	const writeOrderPath = "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order"
+
+	// If write_order changed and the new value is absent, force replacement
+	if d.HasChange(writeOrderPath) {
+		oldV, newV := d.GetChange(writeOrderPath)
+		if isPresentListBlock(oldV) && !isPresentListBlock(newV) {
+			if err := d.ForceNew(writeOrderPath); err != nil {
+				return err
+			}
+			// If you prefer to be extra safe, force new on the parent block instead:
+			// return d.ForceNew("open_table_format_input")
+		}
+	}
+
+	return nil
+}
+
+// Helper: true if the value looks like a populated single-item list block
+func isPresentListBlock(v interface{}) bool {
+	if v == nil {
+		return false
+	}
+	l, ok := v.([]any)
+	return ok && len(l) > 0 && l[0] != nil
+}
 
 func ReadTableID(id string) (string, string, string, error) {
 	idParts := strings.Split(id, ":")
@@ -413,11 +601,22 @@ func resourceCatalogTableCreate(ctx context.Context, d *schema.ResourceData, met
 	name := d.Get(names.AttrName).(string)
 
 	input := &glue.CreateTableInput{
-		CatalogId:            aws.String(catalogID),
-		DatabaseName:         aws.String(dbName),
-		OpenTableFormatInput: expandOpenTableFormat(d),
-		TableInput:           expandTableInput(d),
-		PartitionIndexes:     expandTablePartitionIndexes(d.Get("partition_index").([]any)),
+		CatalogId:    aws.String(catalogID),
+		DatabaseName: aws.String(dbName),
+	}
+
+	if hasOpenTableFormat(d) {
+		// Match AWS CLI request shape for Iceberg:
+		// - DO set top-level Name
+		// - DO set OpenTableFormatInput
+		// - DO NOT set TableInput
+		// - DO NOT set PartitionIndexes
+		input.Name = aws.String(name)
+		input.OpenTableFormatInput = expandOpenTableFormat(d)
+	} else {
+		// Legacy/Hive-style path
+		input.TableInput = expandTableInput(d)
+		input.PartitionIndexes = expandTablePartitionIndexes(d.Get("partition_index").([]any))
 	}
 
 	_, err := conn.CreateTable(ctx, input)
@@ -426,8 +625,20 @@ func resourceCatalogTableCreate(ctx context.Context, d *schema.ResourceData, met
 	}
 
 	d.SetId(fmt.Sprintf("%s:%s:%s", catalogID, dbName, name))
-
 	return append(diags, resourceCatalogTableRead(ctx, d, meta)...)
+}
+
+// returns true if open_table_format_input.0.iceberg_input is set
+func hasOpenTableFormat(d *schema.ResourceData) bool {
+	v, ok := d.GetOk("open_table_format_input")
+	return ok && v != nil && len(v.([]any)) > 0 && v.([]any)[0] != nil
+}
+
+func isIcebergTable(t *awstypes.Table) bool {
+	if t == nil || t.Parameters == nil {
+		return false
+	}
+	return strings.EqualFold(t.Parameters["table_type"], "ICEBERG")
 }
 
 func resourceCatalogTableRead(ctx context.Context, d *schema.ResourceData, meta any) diag.Diagnostics {
@@ -466,21 +677,34 @@ func resourceCatalogTableRead(ctx context.Context, d *schema.ResourceData, meta 
 	d.Set(names.AttrOwner, table.Owner)
 	d.Set("retention", table.Retention)
 
-	if err := d.Set("storage_descriptor", flattenStorageDescriptor(table.StorageDescriptor)); err != nil {
-		return sdkdiag.AppendErrorf(diags, "setting storage_descriptor: %s", err)
+	if isIcebergTable(table) {
+		// Avoid populating HCL for fields that conflict with Iceberg
+		d.Set("storage_descriptor", nil)
+		d.Set("partition_keys", []any{})
+		d.Set(names.AttrParameters, nil)
+	} else {
+		if err := d.Set("storage_descriptor", flattenStorageDescriptor(table.StorageDescriptor)); err != nil {
+			return sdkdiag.AppendErrorf(diags, "setting storage_descriptor: %s", err)
+		}
+		if err := d.Set("partition_keys", flattenColumns(table.PartitionKeys)); err != nil {
+			return sdkdiag.AppendErrorf(diags, "setting partition_keys: %s", err)
+		}
+		if err := d.Set(names.AttrParameters, flattenNonManagedParameters(table)); err != nil {
+			return sdkdiag.AppendErrorf(diags, "setting parameters: %s", err)
+		}
 	}
 
-	if err := d.Set("partition_keys", flattenColumns(table.PartitionKeys)); err != nil {
-		return sdkdiag.AppendErrorf(diags, "setting partition_keys: %s", err)
-	}
+	// if err := d.Set("storage_descriptor", flattenStorageDescriptor(table.StorageDescriptor)); err != nil {
+	// 	return sdkdiag.AppendErrorf(diags, "setting storage_descriptor: %s", err)
+	// }
+
+	// if err := d.Set("partition_keys", flattenColumns(table.PartitionKeys)); err != nil {
+	// 	return sdkdiag.AppendErrorf(diags, "setting partition_keys: %s", err)
+	// }
 
 	d.Set("view_original_text", table.ViewOriginalText)
 	d.Set("view_expanded_text", table.ViewExpandedText)
 	d.Set("table_type", table.TableType)
-
-	if err := d.Set(names.AttrParameters, flattenNonManagedParameters(table)); err != nil {
-		return sdkdiag.AppendErrorf(diags, "setting parameters: %s", err)
-	}
 
 	if table.TargetTable != nil {
 		if err := d.Set("target_table", []any{flattenTableTargetTable(table.TargetTable)}); err != nil {
@@ -520,34 +744,56 @@ func resourceCatalogTableUpdate(ctx context.Context, d *schema.ResourceData, met
 		return sdkdiag.AppendFromErr(diags, err)
 	}
 
-	input := &glue.UpdateTableInput{
-		CatalogId:    aws.String(catalogID),
-		DatabaseName: aws.String(dbName),
-		TableInput:   expandTableInput(d),
-	}
+	// --- OTF path (its own UpdateTable call) ---
+	if d.HasChange("open_table_format_input") {
+		v, _ := d.GetOk("open_table_format_input")
+		m := v.([]any)[0].(map[string]any)
+		u := expandUpdateOpenTableFormat(m)
 
-	// Add back any managed parameters. See flattenNonManagedParameters.
-	table, err := findTableByName(ctx, conn, catalogID, dbName, name)
-
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "reading Glue Catalog Table (%s): %s", d.Id(), err)
-	}
-
-	if allParameters := table.Parameters; allParameters["table_type"] == "ICEBERG" {
-		for _, k := range []string{"table_type", "metadata_location"} {
-			if v := allParameters[k]; v != "" {
-				if input.TableInput.Parameters == nil {
-					input.TableInput.Parameters = make(map[string]string)
-				}
-				input.TableInput.Parameters[k] = v
-			}
+		_, err = conn.UpdateTable(ctx, &glue.UpdateTableInput{
+			CatalogId:                  aws.String(catalogID),
+			DatabaseName:               aws.String(dbName),
+			Name:                       aws.String(name),
+			UpdateOpenTableFormatInput: u,
+		})
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "updating Glue Catalog Table (%s) open table format: %s", d.Id(), err)
 		}
 	}
 
-	_, err = conn.UpdateTable(ctx, input)
+	// --- Non-OTF path (classic attributes) ---
+	if !hasOpenTableFormat(d) && d.HasChanges(
+		names.AttrDescription, names.AttrOwner, "retention",
+		"storage_descriptor", "partition_keys",
+		"view_original_text", "view_expanded_text",
+		"table_type", names.AttrParameters, "target_table",
+	) {
+		in := &glue.UpdateTableInput{
+			CatalogId:    aws.String(catalogID),
+			DatabaseName: aws.String(dbName),
+			TableInput:   expandTableInput(d),
+		}
 
-	if err != nil {
-		return sdkdiag.AppendErrorf(diags, "updating Glue Catalog Table (%s): %s", d.Id(), err)
+		// Keep your existing “managed params” rehydration for Iceberg
+		table, err := findTableByName(ctx, conn, catalogID, dbName, name)
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "reading Glue Catalog Table (%s): %s", d.Id(), err)
+		}
+		if p := table.Parameters; strings.EqualFold(p["table_type"], "ICEBERG") {
+			for _, k := range []string{"table_type", "metadata_location"} {
+				if v := p[k]; v != "" {
+					if in.TableInput.Parameters == nil {
+						in.TableInput.Parameters = map[string]string{}
+					}
+					in.TableInput.Parameters[k] = v
+				}
+			}
+		}
+
+		_, err = conn.UpdateTable(ctx, in)
+		if err != nil {
+			return sdkdiag.AppendErrorf(diags, "updating Glue Catalog Table (%s): %s", d.Id(), err)
+		}
 	}
 
 	return append(diags, resourceCatalogTableRead(ctx, d, meta)...)
@@ -625,8 +871,14 @@ func expandTableInput(d *schema.ResourceData) *awstypes.TableInput {
 	}
 
 	if v, ok := d.GetOk("storage_descriptor"); ok {
-		tableInput.StorageDescriptor = expandStorageDescriptor(v.([]any))
+		if _, ok := d.GetOk("open_table_format_input"); !ok {
+			tableInput.StorageDescriptor = expandStorageDescriptor(v.([]any))
+		}
 	}
+
+	// if v, ok := d.GetOk("storage_descriptor"); ok {
+	// 	tableInput.StorageDescriptor = expandStorageDescriptor(v.([]any))
+	// }
 
 	if v, ok := d.GetOk("partition_keys"); ok {
 		tableInput.PartitionKeys = expandColumns(v.([]any))
@@ -674,6 +926,9 @@ func expandIcebergInput(s map[string]any) *awstypes.IcebergInput {
 	}
 	if v, ok := iceberg[names.AttrVersion].(string); ok && v != "" {
 		icebergInput.Version = aws.String(v)
+	}
+	if l, ok := iceberg["create_iceberg_table_input"].([]any); ok && len(l) > 0 && l[0] != nil {
+		icebergInput.CreateIcebergTableInput = expandCreateIcebergTableInput(l[0].(map[string]any))
 	}
 	return icebergInput
 }
@@ -902,6 +1157,187 @@ func expandTableSchemaReferenceSchemaID(l []any) *awstypes.SchemaId {
 	}
 
 	return schemaID
+}
+
+// ----- OpenTableFormat / Iceberg (Create path) -----
+
+func expandCreateIcebergTableInput(m map[string]any) *awstypes.CreateIcebergTableInput {
+	x := &awstypes.CreateIcebergTableInput{
+		Location: aws.String(m[names.AttrLocation].(string)), // required
+	}
+
+	// Schema (required)
+	if l, ok := m["schema"].([]any); ok && len(l) > 0 && l[0] != nil {
+		x.Schema = expandIcebergSchema(l[0].(map[string]any))
+	}
+
+	// PartitionSpec (optional)
+	if l, ok := m["partition_spec"].([]any); ok && len(l) > 0 && l[0] != nil {
+		x.PartitionSpec = expandIcebergPartitionSpec(l[0].(map[string]any))
+	}
+
+	// Properties (optional)
+	if props, ok := m["properties"].(map[string]any); ok && len(props) > 0 {
+		x.Properties = flex.ExpandStringValueMap(props)
+	}
+
+	// WriteOrder (optional)
+	if l, ok := m["write_order"].([]any); ok && len(l) > 0 && l[0] != nil {
+		x.WriteOrder = expandIcebergSortOrder(l[0].(map[string]any))
+	}
+
+	return x
+}
+
+// ----- Iceberg Schema -----
+
+func expandIcebergSchema(m map[string]any) *awstypes.IcebergSchema {
+	s := &awstypes.IcebergSchema{}
+
+	if l, ok := m["fields"].([]any); ok && len(l) > 0 {
+		s.Fields = expandIcebergStructFields(l)
+	}
+	if l, ok := m["identifier_field_ids"].([]any); ok && len(l) > 0 {
+		ids := make([]int32, 0, len(l))
+		for _, v := range l {
+			ids = append(ids, int32(v.(int)))
+		}
+		s.IdentifierFieldIds = ids
+	}
+	if v, ok := m["schema_id"].(int); ok {
+		s.SchemaId = int32(v)
+	}
+	if v, ok := m["type"].(string); ok && v != "" {
+		s.Type = awstypes.IcebergStructTypeEnum(v)
+	}
+	return s
+}
+
+func expandIcebergStructFields(l []any) []awstypes.IcebergStructField {
+	out := make([]awstypes.IcebergStructField, 0, len(l))
+	for _, el := range l {
+		m := el.(map[string]any)
+		f := awstypes.IcebergStructField{
+			Id:   int32(m["id"].(int)),
+			Name: aws.String(m["name"].(string)),
+		}
+		// required defaults to false if not provided
+		if v, ok := m["required"].(bool); ok {
+			f.Required = v
+		}
+		if v, ok := m["doc"].(string); ok && v != "" {
+			f.Doc = aws.String(v)
+		}
+		// "type" is a JSON string; unmarshal to Go value then wrap with Glue document helper
+		if tj, ok := m["type"].(string); ok && tj != "" {
+			var goVal any
+			if err := json.Unmarshal([]byte(tj), &goVal); err == nil {
+				f.Type = document.NewLazyDocument(goVal) // document.Interface
+			}
+			// If unmarshal fails, you can choose to return an error later or leave unset.
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// ----- Partition Spec -----
+
+func expandIcebergPartitionSpec(m map[string]any) *awstypes.IcebergPartitionSpec {
+	ps := &awstypes.IcebergPartitionSpec{}
+	if v, ok := m["spec_id"].(int); ok {
+		ps.SpecId = int32(v)
+	}
+	if l, ok := m["fields"].([]any); ok && len(l) > 0 {
+		ps.Fields = expandIcebergPartitionFields(l)
+	}
+	return ps
+}
+
+func expandIcebergPartitionFields(l []any) []awstypes.IcebergPartitionField {
+	out := make([]awstypes.IcebergPartitionField, 0, len(l))
+	for _, el := range l {
+		m := el.(map[string]any)
+		f := awstypes.IcebergPartitionField{
+			Name:      aws.String(m["name"].(string)),
+			SourceId:  int32(m["source_id"].(int)),
+			Transform: aws.String(m["transform"].(string)),
+		}
+		if v, ok := m["field_id"].(int); ok {
+			f.FieldId = int32(v)
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// ----- Sort Order (WriteOrder) -----
+
+func expandIcebergSortOrder(m map[string]any) *awstypes.IcebergSortOrder {
+	so := &awstypes.IcebergSortOrder{}
+	if v, ok := m["order_id"].(int); ok {
+		so.OrderId = int32(v)
+	}
+	if l, ok := m["fields"].([]any); ok && len(l) > 0 {
+		so.Fields = expandIcebergSortFields(l)
+	}
+	return so
+}
+
+func expandIcebergSortFields(l []any) []awstypes.IcebergSortField {
+	out := make([]awstypes.IcebergSortField, 0, len(l))
+	for _, el := range l {
+		m := el.(map[string]any)
+		f := awstypes.IcebergSortField{
+			SourceId:  int32(m["source_id"].(int)),
+			Direction: awstypes.IcebergSortDirection(m["direction"].(string)), // enum
+			NullOrder: awstypes.IcebergNullOrder(m["null_order"].(string)),    // enum
+			Transform: aws.String(m["transform"].(string)),                    // *string
+		}
+		out = append(out, f)
+	}
+	return out
+}
+
+// ----- Update path (OpenTableFormat → Iceberg) -----
+
+func expandUpdateOpenTableFormat(m map[string]any) *awstypes.UpdateOpenTableFormatInput {
+	im := m["iceberg_input"].([]any)[0].(map[string]any)
+
+	// Reuse the same nested config users provided for create
+	cil := im["create_iceberg_table_input"].([]any)
+	if len(cil) == 0 || cil[0] == nil {
+		return nil // nothing to update
+	}
+	ci := cil[0].(map[string]any)
+
+	upd := awstypes.IcebergTableUpdate{
+		Location: aws.String(ci[names.AttrLocation].(string)), // required in update model
+	}
+
+	if l, ok := ci["schema"].([]any); ok && len(l) > 0 && l[0] != nil {
+		upd.Schema = expandIcebergSchema(l[0].(map[string]any))
+	}
+	if l, ok := ci["partition_spec"].([]any); ok && len(l) > 0 && l[0] != nil {
+		upd.PartitionSpec = expandIcebergPartitionSpec(l[0].(map[string]any))
+	}
+	if props, ok := ci["properties"].(map[string]any); ok && len(props) > 0 {
+		upd.Properties = flex.ExpandStringValueMap(props)
+	}
+	// if l, ok := ci["write_order"].([]any); ok && len(l) > 0 && l[0] != nil {
+	// 	upd.SortOrder = expandIcebergSortOrder(l[0].(map[string]any))
+	// }
+	if l, ok := ci["write_order"].([]any); ok && len(l) > 0 && l[0] != nil {
+		upd.SortOrder = expandIcebergSortOrder(l[0].(map[string]any))
+	}
+
+	return &awstypes.UpdateOpenTableFormatInput{
+		UpdateIcebergInput: &awstypes.UpdateIcebergInput{
+			UpdateIcebergTableInput: &awstypes.UpdateIcebergTableInput{
+				Updates: []awstypes.IcebergTableUpdate{upd},
+			},
+		},
+	}
 }
 
 func flattenStorageDescriptor(s *awstypes.StorageDescriptor) []map[string]any {

@@ -6,6 +6,7 @@ package glue_test
 import (
 	"context"
 	"fmt"
+	"regexp"
 	"testing"
 
 	sdkacctest "github.com/hashicorp/terraform-plugin-testing/helper/acctest"
@@ -705,6 +706,9 @@ func TestAccGlueCatalogTable_openTableFormat(t *testing.T) {
 					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.#", "1"),
 					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.metadata_operation", "CREATE"),
 					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.version", "2"),
+
+					resource.TestCheckResourceAttr(resourceName, "storage_descriptor.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "partition_keys.#", "0"),
 				),
 			},
 			{
@@ -714,7 +718,7 @@ func TestAccGlueCatalogTable_openTableFormat(t *testing.T) {
 				ImportStateVerifyIgnore: []string{"open_table_format_input"},
 			},
 			{
-				Config:  testAccCatalogTableConfig_openTableFormat(rName, "comment2"),
+				Config:  testAccCatalogTableConfig_openTableFormat(rName, "v2"),
 				Destroy: false,
 				Check: resource.ComposeTestCheckFunc(
 					testAccCheckCatalogTableExists(ctx, resourceName),
@@ -726,6 +730,287 @@ func TestAccGlueCatalogTable_openTableFormat(t *testing.T) {
 			},
 		},
 	})
+}
+
+func TestAccGlueCatalogTable_openTableFormat_writeOrder_addUpdate(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := sdkacctest.RandomWithPrefix(acctest.ResourcePrefix)
+	resourceName := "aws_glue_catalog_table.test"
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.GlueServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTableDestroy(ctx),
+		Steps: []resource.TestStep{
+			// Create without write_order
+			{
+				Config:  testAccCatalogTableConfig_openTableFormat_minimal(rName),
+				Destroy: false,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCatalogTableExists(ctx, resourceName),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.#", "1"),
+					resource.TestCheckNoResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.order_id"),
+					resource.TestCheckResourceAttr(resourceName, "storage_descriptor.#", "0"),
+					resource.TestCheckResourceAttr(resourceName, "partition_keys.#", "0"),
+				),
+			},
+			// Add write_order (should be in-place)
+			{
+				Config:  testAccCatalogTableConfig_openTableFormat_withWriteOrder(rName, 1, "desc", "nulls-last"),
+				Destroy: false,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCatalogTableExists(ctx, resourceName),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.order_id", "1"),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.fields.0.direction", "desc"),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.fields.0.null_order", "nulls-last"),
+				),
+			},
+			// Update write_order fields (should be in-place)
+			{
+				Config:  testAccCatalogTableConfig_openTableFormat_withWriteOrder(rName, 1, "asc", "nulls-first"),
+				Destroy: false,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCatalogTableExists(ctx, resourceName),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.order_id", "1"),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.fields.0.direction", "asc"),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.fields.0.null_order", "nulls-first"),
+				),
+			},
+		},
+	})
+}
+
+func TestAccGlueCatalogTable_openTableFormat_writeOrder_forceNewOnRemoval(t *testing.T) {
+	ctx := acctest.Context(t)
+	rName := sdkacctest.RandomWithPrefix(acctest.ResourcePrefix)
+	resourceName := "aws_glue_catalog_table.test"
+
+	resource.ParallelTest(t, resource.TestCase{
+		PreCheck:                 func() { acctest.PreCheck(ctx, t) },
+		ErrorCheck:               acctest.ErrorCheck(t, names.GlueServiceID),
+		ProtoV5ProviderFactories: acctest.ProtoV5ProviderFactories,
+		CheckDestroy:             testAccCheckTableDestroy(ctx),
+		Steps: []resource.TestStep{
+			// Start with write_order present
+			{
+				Config:  testAccCatalogTableConfig_openTableFormat_withWriteOrder(rName, 1, "desc", "nulls-last"),
+				Destroy: false,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCatalogTableExists(ctx, resourceName),
+					resource.TestCheckResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.order_id", "1"),
+				),
+			},
+			// Remove write_order but set prevent_destroy; plan/apply must error (replacement blocked)
+			{
+				Config:      testAccCatalogTableConfig_openTableFormat_noWriteOrder_preventDestroy(rName),
+				PlanOnly:    true,
+				ExpectError: regexp.MustCompile(`(?i)prevent_destroy`),
+			},
+			// Now actually remove write_order (no prevent_destroy) so replacement can proceed
+			{
+				Config:  testAccCatalogTableConfig_openTableFormat_minimal(rName),
+				Destroy: false,
+				Check: resource.ComposeTestCheckFunc(
+					testAccCheckCatalogTableExists(ctx, resourceName),
+					resource.TestCheckNoResourceAttr(resourceName, "open_table_format_input.0.iceberg_input.0.create_iceberg_table_input.0.write_order.0.order_id"),
+				),
+			},
+		},
+	})
+}
+
+func testAccCatalogTableConfig_openTableFormat_minimal(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_glue_catalog_database" "test" {
+  name = %[1]q
+}
+
+resource "aws_s3_bucket" "bucket" {
+  bucket        = %[1]q
+  force_destroy = true
+}
+
+resource "aws_glue_catalog_table" "test" {
+  database_name = aws_glue_catalog_database.test.name
+  name          = %[1]q
+
+  open_table_format_input {
+    iceberg_input {
+      metadata_operation = "CREATE"
+      version            = 2
+
+      create_iceberg_table_input {
+        location = "s3://${aws_s3_bucket.bucket.bucket}/files/"
+
+        schema {
+          schema_id = 1
+          type      = "struct"
+          fields {
+            id       = 1
+            name     = "my_column_1"
+            required = true
+            type     = jsonencode("timestamp")
+          }
+          fields {
+            id       = 2
+            name     = "my_column_2"
+            required = true
+            type     = jsonencode("long")
+          }
+          identifier_field_ids = [2]
+        }
+
+        partition_spec {
+          spec_id = 1
+          fields {
+            name      = "my_column_1"
+            source_id = 1
+            transform = "day"
+          }
+        }
+
+        properties = {
+          format-version = "2"
+        }
+      }
+    }
+  }
+}
+`, rName)
+}
+
+func testAccCatalogTableConfig_openTableFormat_withWriteOrder(rName string, orderID int, direction, nullOrder string) string {
+	return fmt.Sprintf(`
+resource "aws_glue_catalog_database" "test" {
+  name = %[1]q
+}
+
+resource "aws_s3_bucket" "bucket" {
+  bucket        = %[1]q
+  force_destroy = true
+}
+
+resource "aws_glue_catalog_table" "test" {
+  database_name = aws_glue_catalog_database.test.name
+  name          = %[1]q
+
+  open_table_format_input {
+    iceberg_input {
+      metadata_operation = "CREATE"
+      version            = 2
+
+      create_iceberg_table_input {
+        location = "s3://${aws_s3_bucket.bucket.bucket}/files/"
+
+        schema {
+		  type = "struct"
+          schema_id = 1
+          fields {
+            id       = 1
+            name     = "my_column_1"
+            required = true
+            type     = jsonencode("timestamp")
+          }
+          fields {
+            id       = 2
+            name     = "my_column_2"
+            required = true
+            type     = jsonencode("long")
+          }
+          identifier_field_ids = [2]
+        }
+
+        partition_spec {
+          spec_id = 1
+          fields {
+            name      = "my_column_1"
+            source_id = 1
+            transform = "day"
+          }
+        }
+
+        properties = {
+          format-version = "2"
+        }
+
+        write_order {
+          order_id = %[2]d
+          fields {
+            source_id  = 2
+            transform  = "identity"
+            direction  = %[3]q
+            null_order = %[4]q
+          }
+        }
+      }
+    }
+  }
+}
+`, rName, orderID, direction, nullOrder)
+}
+
+func testAccCatalogTableConfig_openTableFormat_noWriteOrder_preventDestroy(rName string) string {
+	return fmt.Sprintf(`
+resource "aws_glue_catalog_database" "test" {
+  name = %[1]q
+}
+
+resource "aws_s3_bucket" "bucket" {
+  bucket        = %[1]q
+  force_destroy = true
+}
+
+resource "aws_glue_catalog_table" "test" {
+  database_name = aws_glue_catalog_database.test.name
+  name          = %[1]q
+
+  lifecycle {
+    prevent_destroy = true
+  }
+
+  open_table_format_input {
+    iceberg_input {
+      metadata_operation = "CREATE"
+      version            = 2
+
+      create_iceberg_table_input {
+        location = "s3://${aws_s3_bucket.bucket.bucket}/files/"
+
+        schema {
+          schema_id = 1
+          fields {
+            id       = 1
+            name     = "my_column_1"
+            required = true
+            type     = jsonencode("timestamp")
+          }
+          fields {
+            id       = 2
+            name     = "my_column_2"
+            required = true
+            type     = jsonencode("long")
+          }
+          identifier_field_ids = [2]
+        }
+
+        partition_spec {
+          spec_id = 1
+          fields {
+            name      = "my_column_1"
+            source_id = 1
+            transform = "day"
+          }
+        }
+
+        properties = {
+          format-version = "2"
+        }
+      }
+    }
+  }
+}
+`, rName)
 }
 
 func testAccCatalogTableConfig_basic(rName string) string {
@@ -1449,7 +1734,7 @@ resource "aws_glue_catalog_table" "test2" {
 `, rName)
 }
 
-func testAccCatalogTableConfig_openTableFormat(rName, columnComment string) string {
+func testAccCatalogTableConfig_openTableFormat(rName, propVal string) string {
 	return fmt.Sprintf(`
 resource "aws_glue_catalog_database" "test" {
   name = %[1]q
@@ -1463,30 +1748,62 @@ resource "aws_s3_bucket" "bucket" {
 resource "aws_glue_catalog_table" "test" {
   database_name = aws_glue_catalog_database.test.name
   name          = %[1]q
-  table_type    = "EXTERNAL_TABLE"
 
   open_table_format_input {
     iceberg_input {
       metadata_operation = "CREATE"
       version            = 2
-    }
-  }
 
-  storage_descriptor {
-    location = "s3://${aws_s3_bucket.bucket.bucket}/files/"
+      create_iceberg_table_input {
+        location = "s3://${aws_s3_bucket.bucket.bucket}/files/"
 
-    columns {
-      name    = "my_column_1"
-      type    = "int"
-      comment = %[2]q
-    }
+        schema {
+          type     = "struct"
+          schema_id = 1
 
-    columns {
-      name    = "my_column_2"
-      type    = "string"
-      comment = %[2]q
+          fields {
+            id       = 1
+            name     = "my_column_1"
+            required = true
+            type     = jsonencode("timestamp")
+          }
+
+          fields {
+            id       = 2
+            name     = "my_column_2"
+            required = true
+            type     = jsonencode("long")
+          }
+
+          identifier_field_ids = [2]
+        }
+
+		# Add this to both steps
+		partition_spec {
+			spec_id = 1
+			fields {
+				name      = "my_column_1"
+				source_id = 1
+				transform = "day"
+			}
+		}
+		write_order {
+              order_id = 1
+              fields {
+                source_id  = 2
+                direction  = "desc"
+                null_order = "nulls-first"
+                transform  = "identity"
+              }
+		}
+
+        properties = {
+          format-version = "2"
+          test-prop      = %[2]q
+        }
+      }
     }
   }
 }
-`, rName, columnComment)
+`, rName, propVal)
 }

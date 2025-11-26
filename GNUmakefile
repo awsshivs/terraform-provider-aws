@@ -717,13 +717,14 @@ tfsdk2fw: prereq-go ## Install tfsdk2fw
 
 tools: prereq-go ## Install tools
 	@echo "make: Installing tools..."
+	export GOPROXY=http://127.0.0.1:8700
 	cd .ci/providerlint && $(GO_VER) install .
 	cd .ci/tools && $(GO_VER) install github.com/YakDriver/tfproviderdocs
 	cd .ci/tools && $(GO_VER) install github.com/client9/misspell/cmd/misspell
 	cd .ci/tools && $(GO_VER) install github.com/golangci/golangci-lint/v2/cmd/golangci-lint
 	cd .ci/tools && $(GO_VER) install github.com/hashicorp/copywrite
 	cd .ci/tools && $(GO_VER) install github.com/hashicorp/go-changelog/cmd/changelog-build
-	cd .ci/tools && $(GO_VER) install github.com/katbyte/terrafmt
+	# cd .ci/tools && $(GO_VER) install github.com/katbyte/terrafmt  # Using local version instead
 	cd .ci/tools && $(GO_VER) install github.com/pavius/impi/cmd/impi
 	cd .ci/tools && $(GO_VER) install github.com/rhysd/actionlint/cmd/actionlint
 	cd .ci/tools && $(GO_VER) install github.com/terraform-linters/tflint

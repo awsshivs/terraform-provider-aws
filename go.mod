@@ -11,7 +11,7 @@ require (
 	github.com/YakDriver/go-version v0.1.0
 	github.com/YakDriver/regexache v0.24.0
 	github.com/YakDriver/smarterr v0.6.0
-	github.com/aws/aws-sdk-go-v2 v1.37.2
+	github.com/aws/aws-sdk-go-v2 v1.38.0
 	github.com/aws/aws-sdk-go-v2/config v1.30.3
 	github.com/aws/aws-sdk-go-v2/credentials v1.18.3
 	github.com/aws/aws-sdk-go-v2/feature/ec2/imds v1.18.2
@@ -129,7 +129,7 @@ require (
 	github.com/aws/aws-sdk-go-v2/service/gamelift v1.44.0
 	github.com/aws/aws-sdk-go-v2/service/glacier v1.29.0
 	github.com/aws/aws-sdk-go-v2/service/globalaccelerator v1.32.0
-	github.com/aws/aws-sdk-go-v2/service/glue v1.122.0
+	github.com/aws/aws-sdk-go-v2/service/glue v1.126.0
 	github.com/aws/aws-sdk-go-v2/service/grafana v1.29.0
 	github.com/aws/aws-sdk-go-v2/service/greengrass v1.30.0
 	github.com/aws/aws-sdk-go-v2/service/groundstation v1.35.0
@@ -322,8 +322,8 @@ require (
 	github.com/apparentlymart/go-textseg/v15 v15.0.0 // indirect
 	github.com/armon/go-radix v1.0.0 // indirect
 	github.com/aws/aws-sdk-go-v2/aws/protocol/eventstream v1.7.0 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.2 // indirect
-	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.2 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/configsources v1.4.3 // indirect
+	github.com/aws/aws-sdk-go-v2/internal/endpoints/v2 v2.7.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/ini v1.8.3 // indirect
 	github.com/aws/aws-sdk-go-v2/internal/v4a v1.4.2 // indirect
 	github.com/aws/aws-sdk-go-v2/service/internal/accept-encoding v1.13.0 // indirect
@@ -383,3 +383,5 @@ require (
 )
 
 replace github.com/hashicorp/terraform-plugin-log => github.com/gdavison/terraform-plugin-log v0.0.0-20230928191232-6c653d8ef8fb
+
+replace github.com/katbyte/terrafmt => /Users/awsshivs/git/opensource/terrafmt
